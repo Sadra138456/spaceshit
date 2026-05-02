@@ -6,29 +6,22 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "client", "Launch mode: server or client")
-	serverAddr := flag.String("server", "185.208.172.162:443", "Server address")
-	clientLocalAddr := flag.String("local", "0.0.0.0:1080", "Client local SOCKS5 address")
-	psk := flag.String("psk", "SUPER_SECURE_SPACE_PASS", "Pre-shared key")
+	mode := flag.String("mode", "client", "Mode: client or server")
+	serverAddr := flag.String("server", "127.0.0.1:443", "Server address")
+	localAddr := flag.String("local", "0.0.0.0:1080", "Client local SOCKS5 address")
+	psk := flag.String("psk", "MySecretKey123", "Pre-shared key")
+	sni := flag.String("sni", "www.google.com", "SNI domain for TLS")
 	flag.Parse()
 
-	// Generate dynamic XOR key
-	xorKey := GenerateXORKey()
-
 	cfg := Config{
-		ServerAddr:   *serverAddr,
-		LocalAddr:    *localAddr,
-		PSK:          *psk,
-		SNIDomains:   DefaultSNIDomains,
-		HealthCheck:  HealthCheckInt,
-		ReconnectMax: MaxReconnect,
-		XORKey:       xorKey,
+		Mode:       *mode,
+		ServerAddr: *serverAddr,
+		LocalAddr:  *localAddr,
+		PSK:        *psk,
+		SNI:        *sni,
 	}
 
-	log.Printf("[SpaceShit] 🚀 Ferrari Tunnel v2.0")
-	log.Printf("[SpaceShit] Mode: %s", *mode)
-
-	if *mode == "server" {
+	if cfg.Mode == "server" {
 		StartSpaceServer(cfg)
 	} else {
 		StartSpaceClient(cfg)
