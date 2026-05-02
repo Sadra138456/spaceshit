@@ -23,8 +23,7 @@ func runServer(cfg *Config) {
 	}
 
 	quicConf := &quic.Config{
-		Allow0RTT:       true,
-		EnableDatagrams: false,
+		Allow0RTT: true,
 	}
 
 	listener, err := quic.ListenAddr(cfg.ListenAddr, tlsConf, quicConf)
@@ -60,10 +59,9 @@ func handleSession(session quic.Connection, cfg *Config) {
 func handleStream(stream quic.Stream, cfg *Config) {
 	defer stream.Close()
 
-	// Read auth header
-	header := make([]byte, 32+2)
+	header := make([]byte, 34)
 	if _, err := io.ReadFull(stream, header); err != nil {
-		return // Silent drop
+		return
 	}
 
 	targetLen := binary.BigEndian.Uint16(header[32:34])
@@ -74,18 +72,15 @@ func handleStream(stream quic.Stream, cfg *Config) {
 	target := string(targetBuf)
 
 	if !validateAuthHeader(header[:32], cfg.PSK, target) {
-		return // Silent drop (Black-Hole)
+		return
 	}
 
-	// Connect to target
 	remote, err := net.Dial("tcp", target)
 	if err != nil {
-		log.Printf("Target dial failed: %v", err)
 		return
 	}
 	defer remote.Close()
 
-	// Bidirectional relay
 	go io.Copy(stream, remote)
 	io.Copy(remote, stream)
 }
