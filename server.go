@@ -1,97 +1,59 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"log"
 	"net"
-	"encoding/binary"
-
-	"github.com/quic-go/quic-go"
+	"time"
+	"github.com/hashicorp/yamux"
 )
 
-func runServer(cfg *Config) {
+// StartSpaceServer launches the stealth listener
+func StartSpaceServer(cfg Config) {
 	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
 	if err != nil {
-		log.Fatalf("Failed to load TLS certs: %v", err)
+		log.Fatal("Certificate error: ", err)
 	}
 
-	tlsConf := &tls.Config{
+	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"h3"},
+		MinVersion:   tls.VersionTLS13,
 	}
 
-	quicConf := &quic.Config{
-		Allow0RTT: true,
-	}
-
-	listener, err := quic.ListenAddr(cfg.ListenAddr, tlsConf, quicConf)
-	if err != nil {
-		log.Fatal(err)
-	}
+	ln, _ := net.Listen("tcp", cfg.ServerAddr)
+	log.Printf("[SpaceShit] Mission Control started on %s", cfg.ServerAddr)
 
 	for {
-		conn, err := listener.Accept(context.Background())
-		if err != nil {
-			continue
-		}
-		go handleConnection(conn, cfg)
+		conn, _ := ln.Accept()
+		go handleWarpCore(conn, tlsCfg, cfg.PSK)
 	}
 }
 
-func handleConnection(conn quic.Connection, cfg *Config) {
+func handleWarpCore(conn net.Conn, tlsCfg *tls.Config, psk string) {
+	tlsConn := tls.Server(conn, tlsCfg)
+	tlsConn.SetReadDeadline(time.Now().Add(time.Duration(AuthTimeout)))
+
+	// Validate PSK (Silent Authentication)
+	authBuf := make([]byte, len(psk))
+	if _, err := io.ReadFull(tlsConn, authBuf); err != nil || string(authBuf) != psk {
+		tlsConn.Close() // Drop connection if PSK is invalid
+		return
+	}
+
+	// Initialize Yamux Multiplexing for high-speed streams
+	session, _ := yamux.Server(tlsConn, nil)
 	for {
-		stream, err := conn.AcceptStream(context.Background())
+		stream, err := session.Accept()
 		if err != nil {
 			return
 		}
-		go handleStream(stream, cfg)
+		go func(st net.Conn) {
+			defer st.Close()
+			// Forwarding to local backend or proxy (e.g. SOCKS5 server)
+			target, _ := net.Dial("tcp", "127.0.0.1:8080") 
+			go io.Copy(target, st)
+			io.Copy(st, target)
+		}(stream)
 	}
-}
-
-func handleStream(stream quic.Stream, cfg *Config) {
-	defer stream.Close()
-
-	// 1. خواندن هش PSK
-	authHash := make([]byte, 32)
-	if _, err := io.ReadFull(stream, authHash); err != nil {
-		return
-	}
-
-	// 2. تایید هویت (Black-Hole)
-	if !validateAuthHeader(cfg.PSK, authHash) {
-		return // سایلنت دراپ
-	}
-
-	// 3. خواندن آدرس مقصد
-	lenBuf := make([]byte, 2)
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
-		return
-	}
-	targetLen := binary.BigEndian.Uint16(lenBuf)
-	targetBuf := make([]byte, targetLen)
-	if _, err := io.ReadFull(stream, targetBuf); err != nil {
-		return
-	}
-	targetAddr := string(targetBuf)
-
-	// 4. اتصال به مقصد نهایی
-	targetConn, err := net.Dial("tcp", targetAddr)
-	if err != nil {
-		return
-	}
-	defer targetConn.Close()
-
-	// 5. جابجایی ترافیک (Relay)
-	done := make(chan struct{})
-	go func() {
-		io.Copy(targetConn, stream)
-		close(done)
-	}()
-	go func() {
-		io.Copy(stream, targetConn)
-		close(done)
-	}()
-	<-done
 }
