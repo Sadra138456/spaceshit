@@ -14,14 +14,6 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 32*1024)
-		return &buf
-	},
-}
-
-// StartSpaceClient launches Ferrari SOCKS5 proxy
 func StartSpaceClient(cfg Config) {
 	var session *yamux.Session
 	var sessionMu sync.RWMutex
@@ -47,16 +39,13 @@ func StartSpaceClient(cfg Config) {
 			backoff = time.Second
 			log.Printf("[Ferrari] ✅ Tunnel established!")
 
-			// Wait for session to die
 			<-session.CloseChan()
 			log.Printf("[Ferrari] ⚠️  Tunnel disconnected, reconnecting...")
 		}
 	}()
 
-	// Wait for first connection
 	time.Sleep(2 * time.Second)
 
-	// Start SOCKS5 server on 0.0.0.0 (accessible from network)
 	ln, err := net.Listen("tcp", cfg.LocalAddr)
 	if err != nil {
 		log.Fatal("[Ferrari] ❌ Listen error: ", err)
@@ -86,13 +75,11 @@ func StartSpaceClient(cfg Config) {
 }
 
 func connectToServer(cfg Config) (*yamux.Session, error) {
-	// TCP connection
 	conn, err := net.DialTimeout("tcp", cfg.ServerAddr, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
 
-	// uTLS handshake (mimic Chrome)
 	uConn := utls.UClient(conn, &utls.Config{
 		ServerName:         cfg.SNI,
 		InsecureSkipVerify: true,
@@ -104,20 +91,17 @@ func connectToServer(cfg Config) (*yamux.Session, error) {
 		return nil, err
 	}
 
-	// Send PSK (silent auth)
 	if _, err := uConn.Write([]byte(cfg.PSK)); err != nil {
 		uConn.Close()
 		return nil, err
 	}
 
-	// Send padding (DPI bypass)
 	padding := GeneratePadding()
 	if _, err := uConn.Write(padding); err != nil {
 		uConn.Close()
 		return nil, err
 	}
 
-	// Start yamux
 	session, err := yamux.Client(uConn, nil)
 	if err != nil {
 		uConn.Close()
@@ -127,11 +111,9 @@ func connectToServer(cfg Config) (*yamux.Session, error) {
 	return session, nil
 }
 
-// handleSOCKS5 implements RFC 1928
 func handleSOCKS5(clientConn net.Conn, session *yamux.Session) {
 	defer clientConn.Close()
 
-	// Step 1: Greeting (VER, NMETHODS, METHODS)
 	buf := make([]byte, 257)
 	n, err := clientConn.Read(buf)
 	if err != nil || n < 2 {
@@ -143,25 +125,21 @@ func handleSOCKS5(clientConn net.Conn, session *yamux.Session) {
 		return
 	}
 
-	// Reply: NO AUTHENTICATION REQUIRED
 	clientConn.Write([]byte{0x05, 0x00})
 
-	// Step 2: Request (VER, CMD, RSV, ATYP, DST.ADDR, DST.PORT)
 	n, err = clientConn.Read(buf)
 	if err != nil || n < 7 {
 		return
 	}
 
 	ver, cmd, atyp := buf[0], buf[1], buf[3]
-	if ver != 0x05 || cmd != 0x01 { // Only CONNECT supported
-		clientConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // Command not supported
+	if ver != 0x05 || cmd != 0x01 {
+		clientConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 
-	// Parse target address
 	var host string
 	var port uint16
-	pos := 4
 
 	switch atyp {
 	case 0x01: // IPv4
@@ -187,29 +165,25 @@ func handleSOCKS5(clientConn net.Conn, session *yamux.Session) {
 		port = binary.BigEndian.Uint16(buf[20:22])
 
 	default:
-		clientConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // Address type not supported
+		clientConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 
 	targetAddr := fmt.Sprintf("%s:%d", host, port)
 
-	// Open yamux stream
 	stream, err := session.Open()
 	if err != nil {
-		clientConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // General failure
+		clientConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 	defer stream.Close()
 
-	// Send target address to server
 	stream.Write([]byte(targetAddr + "\n"))
 
-	// Reply: SUCCESS
 	clientConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 
 	log.Printf("[Ferrari] 🎯 %s → %s", clientConn.RemoteAddr(), targetAddr)
 
-	// Bidirectional relay
 	errChan := make(chan error, 2)
 
 	go func() {
