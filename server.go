@@ -6,14 +6,15 @@ import (
 	"log"
 	"net"
 	"time"
+
 	"github.com/hashicorp/yamux"
 )
 
-// StartSpaceServer launches the stealth listener
+// StartSpaceServer Ferrari mode
 func StartSpaceServer(cfg Config) {
 	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
 	if err != nil {
-		log.Fatal("Certificate error: ", err)
+		log.Fatal("[SpaceShit] Certificate error: ", err)
 	}
 
 	tlsCfg := &tls.Config{
@@ -21,39 +22,99 @@ func StartSpaceServer(cfg Config) {
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	ln, _ := net.Listen("tcp", cfg.ServerAddr)
-	log.Printf("[SpaceShit] Mission Control started on %s", cfg.ServerAddr)
+	ln, err := net.Listen("tcp", cfg.ServerAddr)
+	if err != nil {
+		log.Fatal("[SpaceShit] Listen failed: ", err)
+	}
+	defer ln.Close()
+
+	log.Printf("[SpaceShit] 🏎️ Ferrari Mission Control on %s", cfg.ServerAddr)
 
 	for {
-		conn, _ := ln.Accept()
-		go handleWarpCore(conn, tlsCfg, cfg.PSK)
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Printf("[SpaceShit] Accept error: %v", err)
+			continue
+		}
+
+		go handleWarpCore(conn, tlsCfg, cfg)
 	}
 }
 
-func handleWarpCore(conn net.Conn, tlsCfg *tls.Config, psk string) {
-	tlsConn := tls.Server(conn, tlsCfg)
-	tlsConn.SetReadDeadline(time.Now().Add(time.Duration(AuthTimeout)))
+func handleWarpCore(conn net.Conn, tlsCfg *tls.Config, cfg Config) {
+	defer conn.Close()
 
-	// Validate PSK (Silent Authentication)
-	authBuf := make([]byte, len(psk))
-	if _, err := io.ReadFull(tlsConn, authBuf); err != nil || string(authBuf) != psk {
-		tlsConn.Close() // Drop connection if PSK is invalid
+	// TCP tuning
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetKeepAlive(true)
+	}
+
+	// TLS handshake
+	tlsConn := tls.Server(conn, tlsCfg)
+	tlsConn.SetReadDeadline(time.Now().Add(AuthTimeout))
+
+	if err := tlsConn.Handshake(); err != nil {
 		return
 	}
 
-	// Initialize Yamux Multiplexing for high-speed streams
-	session, _ := yamux.Server(tlsConn, nil)
+	// PSK validation (XOR obfuscated)
+	authBuf := make([]byte, len(cfg.PSK))
+	if _, err := io.ReadFull(tlsConn, authBuf); err != nil {
+		return
+	}
+
+	XORObfuscate(authBuf, cfg.XORKey)
+	if string(authBuf) != cfg.PSK {
+		return // Silent drop
+	}
+
+	// Clear deadline
+	tlsConn.SetReadDeadline(time.Time{})
+
+	// Yamux session
+	session, err := yamux.Server(tlsConn, nil)
+	if err != nil {
+		return
+	}
+	defer session.Close()
+
 	for {
 		stream, err := session.Accept()
 		if err != nil {
 			return
 		}
-		go func(st net.Conn) {
-			defer st.Close()
-			// Forwarding to local backend or proxy (e.g. SOCKS5 server)
-			target, _ := net.Dial("tcp", "127.0.0.1:8080") 
-			go io.Copy(target, st)
-			io.Copy(st, target)
-		}(stream)
+
+		go handleStream(stream)
 	}
+}
+
+func handleStream(stream net.Conn) {
+	defer stream.Close()
+
+	// Forward to backend
+	target, err := net.DialTimeout("tcp", "127.0.0.1:8080", 5*time.Second)
+	if err != nil {
+		return
+	}
+	defer target.Close()
+
+	// Zero-copy relay
+	done := make(chan struct{}, 2)
+
+	go func() {
+		buf := GetBuffer()
+		defer PutBuffer(buf)
+		io.CopyBuffer(target, stream, *buf)
+		done <- struct{}{}
+	}()
+
+	go func() {
+		buf := GetBuffer()
+		defer PutBuffer(buf)
+		io.CopyBuffer(stream, target, *buf)
+		done <- struct{}{}
+	}()
+
+	<-done
 }
