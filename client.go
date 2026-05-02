@@ -10,7 +10,6 @@ import (
 	"net"
 
 	"github.com/quic-go/quic-go"
-	utls "github.com/refraction-networking/utls"
 )
 
 func runClient(cfg *Config) {
@@ -34,7 +33,6 @@ func runClient(cfg *Config) {
 func handleSOCKS5(conn net.Conn, cfg *Config) {
 	defer conn.Close()
 
-	// SOCKS5 handshake
 	buf := make([]byte, 256)
 	n, err := conn.Read(buf)
 	if err != nil || n < 2 || buf[0] != 0x05 {
@@ -42,7 +40,6 @@ func handleSOCKS5(conn net.Conn, cfg *Config) {
 	}
 	conn.Write([]byte{0x05, 0x00})
 
-	// Read request
 	n, err = conn.Read(buf)
 	if err != nil || n < 7 || buf[0] != 0x05 || buf[1] != 0x01 {
 		return
@@ -50,9 +47,9 @@ func handleSOCKS5(conn net.Conn, cfg *Config) {
 
 	var target string
 	switch buf[3] {
-	case 0x01: // IPv4
+	case 0x01:
 		target = fmt.Sprintf("%d.%d.%d.%d:%d", buf[4], buf[5], buf[6], buf[7], binary.BigEndian.Uint16(buf[8:10]))
-	case 0x03: // Domain
+	case 0x03:
 		domainLen := int(buf[4])
 		target = fmt.Sprintf("%s:%d", buf[5:5+domainLen], binary.BigEndian.Uint16(buf[5+domainLen:7+domainLen]))
 	default:
@@ -60,26 +57,14 @@ func handleSOCKS5(conn net.Conn, cfg *Config) {
 		return
 	}
 
-	// QUIC connection
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"h3"},
 		ServerName:         selectSNI(cfg.SNIDomains),
 	}
 
-	// Apply uTLS fingerprinting
-	utlsConf := &utls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"h3"},
-		ServerName:         tlsConf.ServerName,
-	}
-	_ = utlsConf // Placeholder for future uTLS integration
-
 	quicConf := &quic.Config{
-		Allow0RTT:          true,
-		EnableDatagrams:    false,
-		MaxIdleTimeout:     0,
-		KeepAlivePeriod:    0,
+		Allow0RTT: true,
 	}
 
 	session, err := quic.DialAddr(context.Background(), cfg.ServerAddr, tlsConf, quicConf)
@@ -98,17 +83,14 @@ func handleSOCKS5(conn net.Conn, cfg *Config) {
 	}
 	defer stream.Close()
 
-	// Send auth header
 	authHeader := buildAuthHeader(cfg.PSK, target)
 	if _, err := stream.Write(authHeader); err != nil {
 		log.Printf("Auth header write failed: %v", err)
 		return
 	}
 
-	// Success response
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 
-	// Bidirectional relay
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
@@ -117,9 +99,7 @@ func handleSOCKS5(conn net.Conn, cfg *Config) {
 				return
 			}
 			padded := applyPadding(buf[:n])
-			if _, err := stream.Write(padded); err != nil {
-				return
-			}
+			stream.Write(padded)
 		}
 	}()
 
