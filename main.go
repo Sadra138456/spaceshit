@@ -2,26 +2,21 @@ package main
 
 import (
 	"flag"
-	"log"
 )
 
 func main() {
-	mode := flag.String("mode", "client", "Mode: client or server")
-	serverAddr := flag.String("server", "127.0.0.1:443", "Server address")
-	localAddr := flag.String("local", "0.0.0.0:1080", "Client local SOCKS5 address")
-	psk := flag.String("psk", "MySecretKey123", "Pre-shared key")
-	sni := flag.String("sni", "www.google.com", "SNI domain for TLS")
+	mode := flag.String("mode", "client", "Launch mode: server or client")
 	flag.Parse()
 
+	// Pre-defined high-performance configuration
 	cfg := Config{
-		Mode:       *mode,
-		ServerAddr: *serverAddr,
-		LocalAddr:  *localAddr,
-		PSK:        *psk,
-		SNI:        *sni,
+		ServerAddr: "185.208.172.162:443", // Stealth over HTTPS port
+		LocalAddr:  "127.0.0.1:1080",
+		PSK:        "SUPER_SECURE_SPACE_PASS",
+		SNI:        "www.google.com", // Mimic legitimate traffic
 	}
 
-	if cfg.Mode == "server" {
+	if *mode == "server" {
 		StartSpaceServer(cfg)
 	} else {
 		StartSpaceClient(cfg)
