@@ -1,34 +1,24 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
-	"bytes"
+	"crypto/rand"
+	utls "github.com/refraction-networking/utls"
 )
 
-// تولید هدر امن برای تانل
-func buildAuthHeader(psk string, target string) []byte {
-	hash := hashPSK(psk)
-	targetBytes := []byte(target)
-	targetLen := uint16(len(targetBytes))
-
-	header := make([]byte, 32+2+len(targetBytes))
-	copy(header[0:32], hash)
-	binary.BigEndian.PutUint16(header[32:34], targetLen)
-	copy(header[34:], targetBytes)
-
-	return header
+// GetUTLSConfig generates a Chrome-mimicking TLS configuration
+func GetUTLSConfig(sni string) *utls.Config {
+	return &utls.Config{
+		ServerName: sni,
+		MinVersion: utls.VersionTLS13, // Only TLS 1.3 for maximum security
+	}
 }
 
-func hashPSK(psk string) []byte {
-	key, _ := hex.DecodeString(psk)
-	hash := sha256.Sum256(key)
-	return hash[:]
-}
-
-// حل مشکل ارور undefined در سرور
-func validateAuthHeader(psk string, receivedHash []byte) bool {
-	expectedHash := hashPSK(psk)
-	return bytes.Equal(expectedHash, receivedHash)
+// GeneratePadding creates random noise to defeat statistical traffic analysis
+func GeneratePadding() []byte {
+	sizeBuf := make([]byte, 1)
+	rand.Read(sizeBuf)
+	size := int(sizeBuf[0]) % MaxJunkSize
+	padding := make([]byte, size)
+	rand.Read(padding)
+	return padding
 }
