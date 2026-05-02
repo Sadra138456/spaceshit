@@ -1,34 +1,32 @@
 package main
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
+	"math/rand"
+	"time"
 )
 
-// selectSNI picks a random SNI domain from the list
 func selectSNI(domains []string) string {
 	if len(domains) == 0 {
-		return "https://www.aparat.com" // Default fallback
+		return "www.aparat.com"
 	}
-	idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(domains))))
-	return domains[idx.Int64()]
+	rand.Seed(time.Now().UnixNano())
+	return domains[rand.Intn(len(domains))]
 }
 
-// applyPadding adds random padding (128-512 bytes) to mimic video streaming
 func applyPadding(data []byte) []byte {
-	paddingSize, _ := rand.Int(rand.Reader, big.NewInt(385)) // 128 to 512
-	padding := make([]byte, 128+paddingSize.Int64())
+	rand.Seed(time.Now().UnixNano())
+	chunkID := rand.Intn(9999)
+	fakeHeader := fmt.Sprintf("GET /api/v2/stream/chunk_%d.m4s HTTP/3\r\n\r\n", chunkID)
+	
+	paddingSize := 128 + rand.Intn(385)
+	padding := make([]byte, paddingSize)
 	rand.Read(padding)
-
-	// Prepend fake HTTP/3 header
-	fakeHeader := generateFakeHTTP3Header()
-	return append(append(fakeHeader, data...), padding...)
-}
-
-// generateFakeHTTP3Header creates a fake HTTP/3 GET request header
-func generateFakeHTTP3Header() []byte {
-	chunkID, _ := rand.Int(rand.Reader, big.NewInt(999999))
-	header := fmt.Sprintf("GET /api/v2/stream/chunk_%d.m4s HTTP/3\r\nHost: video.aparat.com\r\n\r\n", chunkID.Int64())
-	return []byte(header)
+	
+	result := make([]byte, 0, len(fakeHeader)+len(data)+len(padding))
+	result = append(result, []byte(fakeHeader)...)
+	result = append(result, data...)
+	result = append(result, padding...)
+	
+	return result
 }
