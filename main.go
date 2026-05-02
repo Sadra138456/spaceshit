@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"log"
@@ -9,39 +8,41 @@ import (
 )
 
 type Config struct {
-	Mode          string   `json:"mode"`
-	ListenAddr    string   `json:"listen_addr"`
-	ServerAddr    string   `json:"server_addr,omitempty"`
-	PSK           string   `json:"psk"`
-	SNIDomains    []string `json:"sni_domains"`
-	EnableFallback bool    `json:"enable_fallback"`
+	Mode           string   `json:"mode"`            // "client" or "server"
+	ListenAddr     string   `json:"listen_addr"`     // Local address to listen
+	ServerAddr     string   `json:"server_addr"`     // Remote server address (for client)
+	PSK            string   `json:"psk"`             // 64 hex characters
+	SNIDomains     []string `json:"sni_domains"`     // List of domains for camouflage
+	EnableFallback bool     `json:"enable_fallback"` // Hide behind a real site
 }
 
 func main() {
-	configPath := flag.String("config", "config.json", "Path to config file")
+	configPath := flag.String("config", "config.json", "path to config file")
 	flag.Parse()
 
-	data, err := os.ReadFile(*configPath)
+	file, err := os.Open(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to read config: %v", err)
+		log.Fatalf("Failed to open config: %v", err)
 	}
+	defer file.Close()
 
 	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Fatalf("Failed to parse config: %v", err)
+	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+		log.Fatalf("Failed to decode config: %v", err)
 	}
 
-	// Validate PSK
-	pskBytes, err := hex.DecodeString(cfg.PSK)
-	if err != nil || len(pskBytes) != 32 {
-		log.Fatalf("PSK must be 64-char hex (32 bytes)")
+	if len(cfg.PSK) != 64 {
+		log.Fatal("PSK must be 64 hex characters (32 bytes)")
 	}
 
-	if cfg.Mode == "client" {
-		runClient(&cfg)
-	} else if cfg.Mode == "server" {
+	switch cfg.Mode {
+	case "client":
+		log.Printf("Starting Client mode on %s -> Tunneling to %s", cfg.ListenAddr, cfg.ServerAddr)
+		runClient(&cfg) // اضافه کردن & برای رفع ارور Pointer
+	case "server":
+		log.Printf("Starting Server mode on %s (Black-Hole active)", cfg.ListenAddr)
 		runServer(&cfg)
-	} else {
-		log.Fatalf("Invalid mode: %s", cfg.Mode)
+	default:
+		log.Fatal("Invalid mode! Use 'client' or 'server'")
 	}
 }
