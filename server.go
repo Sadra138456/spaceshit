@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"io"
 	"log"
 	"net"
+	"encoding/binary"
 
 	"github.com/quic-go/quic-go"
 )
@@ -14,7 +14,7 @@ import (
 func runServer(cfg *Config) {
 	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
 	if err != nil {
-		log.Fatalf("Failed to load TLS cert: %v", err)
+		log.Fatalf("Failed to load TLS certs: %v", err)
 	}
 
 	tlsConf := &tls.Config{
@@ -28,27 +28,21 @@ func runServer(cfg *Config) {
 
 	listener, err := quic.ListenAddr(cfg.ListenAddr, tlsConf, quicConf)
 	if err != nil {
-		log.Fatalf("QUIC listen failed: %v", err)
+		log.Fatal(err)
 	}
-	defer listener.Close()
-
-	log.Printf("[SERVER] Listening on %s (Black-Hole mode)", cfg.ListenAddr)
 
 	for {
-		session, err := listener.Accept(context.Background())
+		conn, err := listener.Accept(context.Background())
 		if err != nil {
-			log.Printf("Accept error: %v", err)
 			continue
 		}
-		go handleSession(session, cfg)
+		go handleConnection(conn, cfg)
 	}
 }
 
-func handleSession(session quic.Connection, cfg *Config) {
-	defer session.CloseWithError(0, "")
-
+func handleConnection(conn quic.Connection, cfg *Config) {
 	for {
-		stream, err := session.AcceptStream(context.Background())
+		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
 			return
 		}
@@ -59,28 +53,45 @@ func handleSession(session quic.Connection, cfg *Config) {
 func handleStream(stream quic.Stream, cfg *Config) {
 	defer stream.Close()
 
-	header := make([]byte, 34)
-	if _, err := io.ReadFull(stream, header); err != nil {
+	// 1. خواندن هش PSK
+	authHash := make([]byte, 32)
+	if _, err := io.ReadFull(stream, authHash); err != nil {
 		return
 	}
 
-	targetLen := binary.BigEndian.Uint16(header[32:34])
+	// 2. تایید هویت (Black-Hole)
+	if !validateAuthHeader(cfg.PSK, authHash) {
+		return // سایلنت دراپ
+	}
+
+	// 3. خواندن آدرس مقصد
+	lenBuf := make([]byte, 2)
+	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+		return
+	}
+	targetLen := binary.BigEndian.Uint16(lenBuf)
 	targetBuf := make([]byte, targetLen)
 	if _, err := io.ReadFull(stream, targetBuf); err != nil {
 		return
 	}
-	target := string(targetBuf)
+	targetAddr := string(targetBuf)
 
-	if !validateAuthHeader(header[:32], cfg.PSK, target) {
-		return
-	}
-
-	remote, err := net.Dial("tcp", target)
+	// 4. اتصال به مقصد نهایی
+	targetConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
 		return
 	}
-	defer remote.Close()
+	defer targetConn.Close()
 
-	go io.Copy(stream, remote)
-	io.Copy(remote, stream)
+	// 5. جابجایی ترافیک (Relay)
+	done := make(chan struct{})
+	go func() {
+		io.Copy(targetConn, stream)
+		close(done)
+	}()
+	go func() {
+		io.Copy(stream, targetConn)
+		close(done)
+	}()
+	<-done
 }
