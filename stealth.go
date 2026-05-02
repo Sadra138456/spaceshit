@@ -1,32 +1,32 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
-	"math/rand"
-	"time"
+	"math/big"
 )
 
 func selectSNI(domains []string) string {
 	if len(domains) == 0 {
-		return "www.aparat.com"
+		return "video.aparat.com" // Default fallback
 	}
-	rand.Seed(time.Now().UnixNano())
-	return domains[rand.Intn(len(domains))]
+	n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(domains))))
+	return domains[n.Int64()]
 }
 
-func applyPadding(data []byte) []byte {
-	rand.Seed(time.Now().UnixNano())
-	chunkID := rand.Intn(9999)
-	fakeHeader := fmt.Sprintf("GET /api/v2/stream/chunk_%d.m4s HTTP/3\r\n\r\n", chunkID)
-	
-	paddingSize := 128 + rand.Intn(385)
-	padding := make([]byte, paddingSize)
+// ایجاد پکت‌های فیک برای گمراه کردن سیستم‌های بازرسی (DPI)
+func getFakePadding() []byte {
+	size, _ := rand.Int(rand.Reader, big.NewInt(384)) // 0 to 384
+	padding := make([]byte, size.Int64()+128)        // Min 128 bytes
 	rand.Read(padding)
-	
-	result := make([]byte, 0, len(fakeHeader)+len(data)+len(padding))
-	result = append(result, []byte(fakeHeader)...)
-	result = append(result, data...)
-	result = append(result, padding...)
-	
-	return result
+	return padding
+}
+
+func generateFakeHTTP3Header(host string) []byte {
+	return []byte(fmt.Sprintf("GET /video/chunk/shd/%d.m4s HTTP/3\r\nHost: %s\r\n\r\n", 1000+makeInt(), host))
+}
+
+func makeInt() int64 {
+	n, _ := rand.Int(rand.Reader, big.NewInt(9000))
+	return n.Int64()
 }
