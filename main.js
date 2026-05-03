@@ -1,34 +1,37 @@
-import { startServer } from './server.js';
-import { startClient } from './client.js';
-import { startSOCKS5 } from './socks5.js';
-import { startQuantumShaper } from './quantum-shaper.js';
-import { startAIFeedback } from './ai-feedback.js';
+const { startServer } = require('./server.js');
+const { startClient } = require('./client.js');
+const { startSocks5 } = require('./socks5.js');
+
+const config = {
+  serverHost: '0.0.0.0',
+  serverPort: 443,
+  localHost: '0.0.0.0',
+  localPort: 1080,
+  tlsKey: 'server.key',
+  tlsCert: 'server.crt'
+};
 
 const mode = process.argv[2] || 'both';
 
-console.log(`[SPACESHIT] Starting in ${mode} mode...`);
+console.log(`
+╔═══════════════════════════════════════╗
+║     SPACESHIT QUANTUM TUNNEL v1.0     ║
+║     Anti-DPI Proxy System             ║
+╚═══════════════════════════════════════╝
+`);
 
-switch (mode) {
-    case 'server':
-        startServer();
-        startAIFeedback();
-        break;
-
-    case 'client':
-        startSOCKS5();
-        startQuantumShaper();
-        startClient();
-        break;
-
-    case 'both':
-        startServer();
-        startAIFeedback();
-        startSOCKS5();
-        startQuantumShaper();
-        startClient();
-        break;
-
-    default:
-        console.log('Usage: node main.js [server|client|both]');
-        process.exit(1);
+if (mode === 'server' || mode === 'both') {
+  console.log('[MAIN] Starting SERVER mode...');
+  startServer(config);
 }
+
+if (mode === 'client' || mode === 'both') {
+  console.log('[MAIN] Starting CLIENT mode...');
+  
+  setTimeout(() => {
+    const client = startClient(config);
+    startSocks5(config, () => client.getSocket());
+  }, 1000);
+}
+
+console.log(`[MAIN] ✓ Running in ${mode.toUpperCase()} mode\n`);
