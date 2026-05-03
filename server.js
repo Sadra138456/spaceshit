@@ -1,73 +1,68 @@
-import tls from 'tls';
-import { getQuantumStrategy } from './quantum-shaper.js';
-import { sendFeedback } from './ai-feedback.js';
+const tls = require('tls');
+const fs = require('fs');
+const crypto = require('crypto');
 
-const SERVER_HOST = '185.208.172.162';
-const SERVER_PORT = 443;
+function startServer(config) {
+  const options = {
+    key: fs.readFileSync(config.tlsKey),
+    cert: fs.readFileSync(config.tlsCert),
+    requestCert: false,
+    rejectUnauthorized: false,
+    minVersion: 'TLSv1.2'
+  };
 
-export function startClient() {
-    console.log('[CLIENT] Starting quantum TLS client...');
-    connectWithQuantum();
+  const clients = new Map();
+
+  const server = tls.createServer(options, (socket) => {
+    const clientId = `${socket.remoteAddress}:${socket.remotePort}`;
+    console.log(`[SERVER] ✓ Client connected: ${clientId}`);
+    
+    clients.set(clientId, socket);
+
+    // Quantum pattern authentication
+    socket.once('data', (data) => {
+      if (data.length < 16) {
+        console.log(`[SERVER] ✗ Invalid auth from ${clientId}`);
+        socket.destroy();
+        return;
+      }
+
+      const pattern = data.slice(0, 16).toString('hex');
+      console.log(`[SERVER] ✓ Auth pattern: ${pattern.substring(0, 8)}...`);
+      
+      // Send ACK
+      const ack = crypto.randomBytes(16);
+      socket.write(ack);
+
+      // Handle data tunneling
+      socket.on('data', (chunk) => {
+        console.log(`[SERVER] ← Received ${chunk.length} bytes from ${clientId}`);
+        // Here you would forward to actual destination
+        socket.write(Buffer.from([0x00])); // ACK
+      });
+    });
+
+    socket.on('error', (err) => {
+      console.error(`[SERVER] ✗ Error ${clientId}: ${err.message}`);
+      clients.delete(clientId);
+    });
+
+    socket.on('end', () => {
+      console.log(`[SERVER] ✗ Client disconnected: ${clientId}`);
+      clients.delete(clientId);
+    });
+  });
+
+  server.listen(config.serverPort, config.serverHost, () => {
+    console.log(`[SERVER] 🚀 Listening on ${config.serverHost}:${config.serverPort}`);
+  });
+
+  server.on('error', (err) => {
+    console.error(`[SERVER] ✗ Fatal error: ${err.message}`);
+    process.exit(1);
+  });
+
+  return server;
 }
 
-async function connectWithQuantum() {
-    while (true) {
-        try {
-            console.log('[CLIENT] Connecting to server...');
-
-            // Get quantum strategy from AI
-            const strategy = await getQuantumStrategy({
-                target: `${SERVER_HOST}:${SERVER_PORT}`,
-                lastAttempt: Date.now()
-            });
-
-            console.log('[CLIENT] Quantum strategy:', strategy);
-
-            // Apply quantum delay
-            await sleep(strategy.delay_ms);
-
-            // Connect with TLS
-            const socket = tls.connect({
-                host: SERVER_HOST,
-                port: SERVER_PORT,
-                servername: strategy.sni || 'www.google.com',
-                rejectUnauthorized: false,
-                minVersion: 'TLSv1.2',
-                maxVersion: 'TLSv1.3',
-                ciphers: strategy.ciphers || 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384'
-            });
-
-            socket.on('secureConnect', () => {
-                console.log('[CLIENT] ✓ Connected successfully!');
-                sendFeedback({ success: true, strategy });
-
-                // Keep alive with quantum pattern
-                setInterval(() => {
-                    if (!socket.destroyed) {
-                        socket.write(Buffer.from('ping'));
-                    }
-                }, 30000);
-            });
-
-            socket.on('error', (err) => {
-                console.log('[CLIENT] ✗ Connection failed:', err.message);
-                sendFeedback({ success: false, error: err.message, strategy });
-            });
-
-            socket.on('end', () => {
-                console.log('[CLIENT] Connection closed');
-            });
-
-            // Wait before retry
-            await sleep(10000);
-
-        } catch (err) {
-            console.log('[CLIENT] Error:', err.message);
-            await sleep(5000);
-        }
-    }
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+module.exports = { startServer };
