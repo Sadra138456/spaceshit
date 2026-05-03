@@ -3,7 +3,7 @@ import OpenAI from "openai";
 import tls from 'tls';
 
 const client = new OpenAI({
-    apiKey: "YOUR_API_KEY",
+    apiKey: "sk-TX6qZhnG4cKDsUKKglUGw41pYaOFNPfOJzTP6ZdrVgE1psOl",
     baseURL: "https://api.gapgpt.app/v1"
 });
 
