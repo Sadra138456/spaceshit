@@ -1,119 +1,89 @@
 package main
 
 import (
-	"bufio"
 	"crypto/tls"
 	"io"
 	"log"
 	"net"
-	"strings"
-	"time"
 
 	"github.com/hashicorp/yamux"
 )
 
-func StartSpaceServer(cfg Config) {
-	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
+func RunServer(cfg *Config) {
+	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		log.Fatal("[Ferrari] ❌ TLS cert error: ", err)
+		log.Fatalf("Failed to load certificate: %v", err)
 	}
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
+		MinVersion:   tls.VersionTLS12,
 	}
 
-	ln, err := tls.Listen("tcp", cfg.ServerAddr, tlsConfig)
+	listener, err := tls.Listen("tcp", cfg.ServerAddr, tlsConfig)
 	if err != nil {
-		log.Fatal("[Ferrari] ❌ Listen error: ", err)
+		log.Fatalf("Failed to start server: %v", err)
 	}
+	defer listener.Close()
 
-	log.Printf("[Ferrari] 🏎️  Server listening on %s", cfg.ServerAddr)
+	log.Printf("[Ferrari] 🏎️  Server running on %s", cfg.ServerAddr)
 
 	for {
-		conn, err := ln.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("[Ferrari] ⚠️  Accept error: %v", err)
+			log.Printf("Accept error: %v", err)
 			continue
 		}
-
-		go handleClient(conn, cfg)
+		go handleServerConnection(conn, cfg)
 	}
 }
 
-func handleClient(conn net.Conn, cfg Config) {
+func handleServerConnection(conn net.Conn, cfg *Config) {
 	defer conn.Close()
 
-	tlsConn := conn.(*tls.Conn)
-	tlsConn.SetReadDeadline(time.Now().Add(AuthTimeout))
+	// XOR obfuscation
+	obfsConn := NewObfuscatedConn(conn, cfg.PSK)
 
-	pskBuf := make([]byte, len(cfg.PSK))
-	if _, err := io.ReadFull(tlsConn, pskBuf); err != nil {
-		return
-	}
-
-	if string(pskBuf) != cfg.PSK {
-		return
-	}
-
-	junkBuf := make([]byte, MaxJunkSize)
-	tlsConn.Read(junkBuf)
-
-	tlsConn.SetReadDeadline(time.Time{})
-
-	session, err := yamux.Server(tlsConn, nil)
+	// Yamux session
+	session, err := yamux.Server(obfsConn, nil)
 	if err != nil {
+		log.Printf("Yamux server error: %v", err)
 		return
 	}
 	defer session.Close()
-
-	log.Printf("[Ferrari] ✅ Client authenticated: %s", conn.RemoteAddr())
 
 	for {
 		stream, err := session.Accept()
 		if err != nil {
 			return
 		}
-
 		go handleStream(stream)
 	}
 }
 
-func handleStream(stream net.Conn) {
+func handleStream(stream *yamux.Stream) {
 	defer stream.Close()
 
-	reader := bufio.NewReader(stream)
-	targetAddr, err := reader.ReadString('\n')
+	// ✅ دریافت target address از client
+	buf := make([]byte, 512)
+	n, err := stream.Read(buf)
 	if err != nil {
+		log.Printf("Failed to read target: %v", err)
 		return
 	}
 
-	targetAddr = strings.TrimSpace(targetAddr)
+	targetAddr := string(buf[:n])
+	log.Printf("[Ferrari] 🎯 Connecting to: %s", targetAddr)
 
-	backend, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	// ✅ اتصال به target واقعی (نه 127.0.0.1:8080)
+	target, err := net.Dial("tcp", targetAddr)
 	if err != nil {
-		log.Printf("[Ferrari] ❌ Backend dial failed: %s → %v", targetAddr, err)
+		log.Printf("Failed to connect to %s: %v", targetAddr, err)
 		return
 	}
-	defer backend.Close()
+	defer target.Close()
 
-	log.Printf("[Ferrari] 🔗 Forwarding to %s", targetAddr)
-
-	errChan := make(chan error, 2)
-
-	go func() {
-		buf := bufferPool.Get().(*[]byte)
-		defer bufferPool.Put(buf)
-		_, err := io.CopyBuffer(backend, stream, *buf)
-		errChan <- err
-	}()
-
-	go func() {
-		buf := bufferPool.Get().(*[]byte)
-		defer bufferPool.Put(buf)
-		_, err := io.CopyBuffer(stream, backend, *buf)
-		errChan <- err
-	}()
-
-	<-errChan
+	// Forward traffic
+	go io.Copy(target, stream)
+	io.Copy(stream, target)
 }
