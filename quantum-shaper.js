@@ -1,81 +1,55 @@
+class QuantumShaper {
+  constructor(aiEndpoint) {
+    this.aiEndpoint = aiEndpoint;
+    this.patterns = [];
+  }
 
-import OpenAI from "openai";
-import tls from 'tls';
+  async analyzeTraffic(data) {
+    // تحلیل الگوی ترافیک با AI
+    const prompt = `Analyze this traffic pattern for DPI detection risk:
+Data size: ${data.length} bytes
+Entropy: ${this.calculateEntropy(data)}
+Pattern: ${this.detectPattern(data)}
 
-const client = new OpenAI({
-    apiKey: "sk-TX6qZhnG4cKDsUKKglUGw41pYaOFNPfOJzTP6ZdrVgE1psOl",
-    baseURL: "https://api.gapgpt.app/v1"
-});
+Suggest obfuscation strategy.`;
 
-let quantumState = {
-    entropy: 0.5,
-    phase: 0,
-    successRate: 0,
-    totalAttempts: 0
-};
-
-export async function getQuantumStrategy(context) {
     try {
-        const response = await client.responses.create({
-            model: "gapgpt-qwen-3.5",
-            input: `
-You are a quantum traffic shaper for bypassing DPI.
+      const response = await fetch(this.aiEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.5
+        })
+      });
 
-Current quantum state:
-${JSON.stringify(quantumState)}
-
-Context:
-${JSON.stringify(context)}
-
-Generate next connection strategy. Reply ONLY with valid JSON:
-{
-  "delay_ms": 100,
-  "sni": "www.google.com",
-  "fragment_size": 1400,
-  "entropy": 0.6,
-  "ciphers": "TLS_AES_128_GCM_SHA256"
-}
-            `
-        });
-
-        const strategy = JSON.parse(response.output_text);
-        
-        // Update quantum state
-        quantumState.entropy = strategy.entropy || quantumState.entropy;
-        quantumState.phase = (quantumState.phase + 0.1) % 1.0;
-        quantumState.totalAttempts++;
-
-        return strategy;
-
+      const result = await response.json();
+      return result.choices[0].message.content;
     } catch (err) {
-        console.log('[QUANTUM] AI failed, using fallback:', err.message);
-        return {
-            delay_ms: 50 + Math.random() * 200,
-            sni: 'www.google.com',
-            fragment_size: 1400,
-            entropy: 0.5
-        };
+      return 'default-obfuscation';
     }
+  }
+
+  calculateEntropy(buffer) {
+    const freq = new Map();
+    for (const byte of buffer) {
+      freq.set(byte, (freq.get(byte) || 0) + 1);
+    }
+
+    let entropy = 0;
+    for (const count of freq.values()) {
+      const p = count / buffer.length;
+      entropy -= p * Math.log2(p);
+    }
+
+    return entropy.toFixed(2);
+  }
+
+  detectPattern(buffer) {
+    // ساده‌سازی شده
+    const sample = buffer.slice(0, 16).toString('hex');
+    return sample;
+  }
 }
 
-export async function quantumConnect(target, port) {
-    const strategy = await getQuantumStrategy({ target, port });
-    
-    await sleep(strategy.delay_ms);
-
-    return tls.connect({
-        host: target,
-        port: port,
-        servername: strategy.sni || target,
-        rejectUnauthorized: false
-    });
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-export function startQuantumShaper() {
-    console.log('[QUANTUM] Shaper initialized');
-    console.log('[QUANTUM] Initial state:', quantumState);
-}
+module.exports = { QuantumShaper };
