@@ -3,37 +3,48 @@ package main
 import (
 	"log"
 	"os"
-	"time"
 )
 
 func main() {
+
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: ./spaceshit [server|client|both]")
+		log.Println("Usage:")
+		log.Println("./spaceshit server")
+		log.Println("./spaceshit client")
+		log.Println("./spaceshit both")
+		return
 	}
 
-	mode := os.Args[1]
+	cfg := DefaultConfig()
 
-	cfg := &Config{
-		ServerAddr: "0.0.0.0:443",
-		LocalAddr:  "0.0.0.0:1080",
-		PSK:        "8vN2xK9mP4wQ7jL5tR3yH6nB1sF0dA8c",
-		SNI:        "cloudflare.com",
-		CertFile:   "server.crt",
-		KeyFile:    "server.key",
-	}
+	switch os.Args[1] {
 
-	switch mode {
 	case "server":
-		RunServer(cfg)
+		log.Println("Starting server...")
+		if err := RunServer(cfg); err != nil {
+			log.Fatal(err)
+		}
+
 	case "client":
-		RunClient(cfg)
+		log.Println("Starting client...")
+		if err := RunClient(cfg); err != nil {
+			log.Fatal(err)
+		}
+
 	case "both":
-		go RunServer(cfg)
-		time.Sleep(2 * time.Second)
-		clientCfg := *cfg
-		clientCfg.ServerAddr = "127.0.0.1:443"
-		RunClient(&clientCfg)
+		log.Println("Starting server + client...")
+
+		go func() {
+			if err := RunServer(cfg); err != nil {
+				log.Fatal(err)
+			}
+		}()
+
+		if err := RunClient(cfg); err != nil {
+			log.Fatal(err)
+		}
+
 	default:
-		log.Fatal("Invalid mode. Use: server, client, or both")
+		log.Println("Unknown command")
 	}
 }
