@@ -1,51 +1,60 @@
-import OpenAI from "openai";
+class AIFeedback {
+  constructor(aiEndpoint) {
+    this.aiEndpoint = aiEndpoint;
+    this.history = [];
+  }
 
-const client = new OpenAI({
-    apiKey: "sk-TX6qZhnG4cKDsUKKglUGw41pYaOFNPfOJzTP6ZdrVgE1psOlY",
-    baseURL: "https://api.gapgpt.app/v1"
-});
-
-let feedbackHistory = [];
-
-export async function sendFeedback(result) {
-    feedbackHistory.push({
-        timestamp: Date.now(),
-        ...result
+  async reportSuccess(protocol, port, latency) {
+    this.history.push({
+      protocol,
+      port,
+      latency,
+      success: true,
+      timestamp: Date.now()
     });
 
-    // Keep last 100 results
-    if (feedbackHistory.length > 100) {
-        feedbackHistory.shift();
+    console.log(`[AI-FEEDBACK] ✓ Success: ${protocol}:${port} (${latency}ms)`);
+  }
+
+  async reportFailure(protocol, port, reason) {
+    this.history.push({
+      protocol,
+      port,
+      reason,
+      success: false,
+      timestamp: Date.now()
+    });
+
+    console.log(`[AI-FEEDBACK] ✗ Failure: ${protocol}:${port} - ${reason}`);
+
+    // ارسال به AI برای یادگیری
+    if (this.history.length % 10 === 0) {
+      await this.sendToAI();
     }
+  }
+
+  async sendToAI() {
+    const prompt = `Learn from these connection attempts in Iran:
+${JSON.stringify(this.history.slice(-20), null, 2)}
+
+What patterns indicate DPI blocking? Suggest improvements.`;
 
     try {
-        await client.responses.create({
-            model: "gapgpt-qwen-3.5",
-            input: `
-Feedback from connection attempt:
-${JSON.stringify(result)}
+      const response = await fetch(this.aiEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.7
+        })
+      });
 
-Recent history (last 10):
-${JSON.stringify(feedbackHistory.slice(-10))}
-
-Learn from this and improve your quantum strategy.
-            `
-        });
-
-        console.log('[FEEDBACK] ✓ Sent to AI');
-
+      const result = await response.json();
+      console.log('[AI-FEEDBACK] AI Insights:', result.choices[0].message.content);
     } catch (err) {
-        console.log('[FEEDBACK] ✗ Failed:', err.message);
+      console.error('[AI-FEEDBACK] Failed to send feedback:', err.message);
     }
+  }
 }
 
-export function startAIFeedback() {
-    console.log('[FEEDBACK] AI learning loop started');
-    
-    // Periodic summary
-    setInterval(() => {
-        const recent = feedbackHistory.slice(-10);
-        const successCount = recent.filter(r => r.success).length;
-        console.log(`[FEEDBACK] Success rate: ${successCount}/10`);
-    }, 60000);
-}
+module.exports = { AIFeedback };
