@@ -3,15 +3,15 @@ package main
 import "time"
 
 type Config struct {
-	Mode       string
 	ServerAddr string
 	LocalAddr  string
 	PSK        string
 	SNI        string
+	CertFile   string
+	KeyFile    string
 }
 
 const (
-	AuthTimeout  = 4 * time.Second
-	MaxJunkSize  = 1024
-	BufferSize   = 32 * 1024
+	MaxJunkSize = 4096
+	AuthTimeout = 5 * time.Second
 )
