@@ -2,58 +2,85 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/binary"
 	"io"
 	"log"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/hashicorp/yamux"
 )
 
 func RunServer(cfg *Config) {
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	tlsConfig, err := NewServerTLSConfig(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		log.Fatalf("Failed to load certificate: %v", err)
+		log.Fatalf("❌ TLS config failed: %v", err)
 	}
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
-
-	listener, err := tls.Listen("tcp", cfg.ServerAddr, tlsConfig)
+	ln, err := tls.Listen("tcp", cfg.ServerAddr, tlsConfig)
 	if err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		log.Fatalf("❌ Server listen failed: %v", err)
 	}
-	defer listener.Close()
+	defer ln.Close()
 
-	log.Printf("[Ferrari] 🏎️  Server running on %s", cfg.ServerAddr)
+	log.Printf("🚀 Server listening on %s", cfg.ServerAddr)
 
 	for {
-		conn, err := listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("Accept error: %v", err)
+			log.Printf("⚠️  Accept error: %v", err)
 			continue
 		}
-		go handleServerConnection(conn, cfg)
+		go handleServerConn(conn, cfg)
 	}
 }
 
-func handleServerConnection(conn net.Conn, cfg *Config) {
+func handleServerConn(conn net.Conn, cfg *Config) {
 	defer conn.Close()
 
-	// XOR obfuscation
-	obfsConn := NewObfuscatedConn(conn, cfg.PSK)
+	conn.SetDeadline(time.Now().Add(AuthTimeout))
 
-	// Yamux session
-	session, err := yamux.Server(obfsConn, nil)
+	// ✅ Read PSK
+	pskBuf := make([]byte, len(cfg.PSK))
+	if _, err := io.ReadFull(conn, pskBuf); err != nil {
+		log.Printf("⚠️  PSK read failed: %v", err)
+		return
+	}
+	if string(pskBuf) != cfg.PSK {
+		log.Println("⚠️  Invalid PSK")
+		return
+	}
+
+	// ✅ Read padding length
+	var padLen uint16
+	if err := binary.Read(conn, binary.BigEndian, &padLen); err != nil {
+		log.Printf("⚠️  Padding length read failed: %v", err)
+		return
+	}
+
+	// ✅ Discard padding
+	if padLen > 0 {
+		if _, err := io.CopyN(io.Discard, conn, int64(padLen)); err != nil {
+			log.Printf("⚠️  Padding discard failed: %v", err)
+			return
+		}
+	}
+
+	conn.SetDeadline(time.Time{})
+
+	// ✅ Create yamux session
+	session, err := yamux.Server(conn, nil)
 	if err != nil {
-		log.Printf("Yamux server error: %v", err)
+		log.Printf("⚠️  Yamux server failed: %v", err)
 		return
 	}
 	defer session.Close()
 
+	log.Println("✅ Client authenticated")
+
 	for {
-		stream, err := session.Accept()
+		stream, err := session.AcceptStream()
 		if err != nil {
 			return
 		}
@@ -61,29 +88,46 @@ func handleServerConnection(conn net.Conn, cfg *Config) {
 	}
 }
 
-func handleStream(stream *yamux.Stream) {
+func handleStream(stream net.Conn) {
 	defer stream.Close()
 
-	// ✅ دریافت target address از client
-	buf := make([]byte, 512)
-	n, err := stream.Read(buf)
-	if err != nil {
-		log.Printf("Failed to read target: %v", err)
+	// ✅ Read target address from client
+	var addrLen uint16
+	if err := binary.Read(stream, binary.BigEndian, &addrLen); err != nil {
+		log.Printf("⚠️  Address length read failed: %v", err)
 		return
 	}
 
-	targetAddr := string(buf[:n])
-	log.Printf("[Ferrari] 🎯 Connecting to: %s", targetAddr)
-
-	// ✅ اتصال به target واقعی (نه 127.0.0.1:8080)
-	target, err := net.Dial("tcp", targetAddr)
-	if err != nil {
-		log.Printf("Failed to connect to %s: %v", targetAddr, err)
+	addrBuf := make([]byte, addrLen)
+	if _, err := io.ReadFull(stream, addrBuf); err != nil {
+		log.Printf("⚠️  Address read failed: %v", err)
 		return
 	}
-	defer target.Close()
 
-	// Forward traffic
-	go io.Copy(target, stream)
-	io.Copy(stream, target)
+	targetAddr := string(addrBuf)
+	log.Printf("🔗 Connecting to %s", targetAddr)
+
+	// ✅ Connect to real target
+	backend, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("⚠️  Backend dial failed: %v", err)
+		return
+	}
+	defer backend.Close()
+
+	// ✅ Bidirectional copy
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(backend, stream)
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(stream, backend)
+	}()
+
+	wg.Wait()
 }
