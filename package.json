@@ -1,14 +1,15 @@
 {
   "name": "spaceshit",
   "version": "1.0.0",
-  "type": "module",
-  "dependencies": {
-    "openai": "^4.77.0",
-    "socks": "^2.8.3"
-  },
+  "description": "Quantum Anti-DPI Tunnel",
+  "main": "main.js",
   "scripts": {
     "server": "node main.js server",
     "client": "node main.js client",
     "both": "node main.js both"
-  }
+  },
+  "keywords": ["proxy", "anti-dpi", "tunnel"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {}
 }
