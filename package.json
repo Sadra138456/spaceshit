@@ -1,0 +1,14 @@
+{
+  "name": "spaceshit",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "openai": "^4.77.0",
+    "socks": "^2.8.3"
+  },
+  "scripts": {
+    "server": "node main.js server",
+    "client": "node main.js client",
+    "both": "node main.js both"
+  }
+}
