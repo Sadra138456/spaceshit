@@ -1,24 +1,37 @@
 package main
 
 import (
-	"flag"
+	"fmt"
 )
 
 func main() {
-	mode := flag.String("mode", "client", "Launch mode: server or client")
-	flag.Parse()
-
-	// Pre-defined high-performance configuration
-	cfg := Config{
-		ServerAddr: "185.208.172.162:443", // Stealth over HTTPS port
-		LocalAddr:  "127.0.0.1:1080",
-		PSK:        "SUPER_SECURE_SPACE_PASS",
-		SNI:        "www.google.com", // Mimic legitimate traffic
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: spaceshit [server|client]")
+		return
 	}
 
-	if *mode == "server" {
-		StartSpaceServer(cfg)
+	mode := os.Args[1]
+
+	if mode == "server" {
+		cfg := &Config{
+			ServerAddr: "0.0.0.0:443",
+			PSK:        "
+
+7f8c2e41b9a5d3f0e812c6a49d7b5f2a1c0e3d5b8a9f4c2e7d1b6a0f3e2d5c8b",
+			CertFile:   "server.crt",
+			KeyFile:    "server.key",
+		}
+		RunServer(cfg)
+	} else if mode == "client" {
+		cfg := &Config{
+			ServerAddr: "185.208.172.162:443",
+			LocalAddr:  "0.0.0.0:1080",  // ✅ تغییر از 127.0.0.1 به 0.0.0.0
+			PSK:        "
+
+7f8c2e41b9a5d3f0e812c6a49d7b5f2a1c0e3d5b8a9f4c2e7d1b6a0f3e2d5c8b",
+		}
+		RunClient(cfg)
 	} else {
-		StartSpaceClient(cfg)
+		fmt.Println("Invalid mode. Use 'server' or 'client'")
 	}
 }
