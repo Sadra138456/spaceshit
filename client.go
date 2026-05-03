@@ -6,165 +6,87 @@ import (
 	"io"
 	"log"
 	"net"
-	"sync"
 	"time"
 
-	utls "github.com/refraction-networking/utls"
 	"github.com/hashicorp/yamux"
+	utls "github.com/refraction-networking/utls"
 )
 
-func RunClient(cfg *Config) {
+func RunClient(cfg *Config) error {
 	for {
-		if err := runClientOnce(cfg); err != nil {
-			log.Printf("⚠️  Client error: %v, retrying in 5s...", err)
-			time.Sleep(5 * time.Second)
+		if err := runClientSession(cfg); err != nil {
+			log.Printf("❌ Client error: %v. Reconnecting in %v...", err, cfg.ReconnectDelay)
+			time.Sleep(cfg.ReconnectDelay)
+			continue
 		}
 	}
 }
 
-func runClientOnce(cfg *Config) error {
-	// ✅ Connect to server
-	tcpConn, err := net.DialTimeout("tcp", cfg.ServerAddr, 10*time.Second)
+func runClientSession(cfg *Config) error {
+	// Connect to server
+	rawConn, err := net.DialTimeout("tcp", cfg.ServerAddr, 10*time.Second)
 	if err != nil {
-		return fmt.Errorf("dial failed: %w", err)
-	}
-	defer tcpConn.Close()
-
-	// ✅ uTLS handshake
-	tlsConfig := NewClientTLSConfig(cfg.SNI)
-	uConn := utls.UClient(tcpConn, tlsConfig, utls.HelloChrome_Auto)
-	if err := uConn.Handshake(); err != nil {
-		return fmt.Errorf("TLS handshake failed: %w", err)
+		return fmt.Errorf("dial failed: %v", err)
 	}
 
-	// ✅ Send PSK
-	if _, err := uConn.Write([]byte(cfg.PSK)); err != nil {
-		return fmt.Errorf("PSK write failed: %w", err)
+	// uTLS handshake
+	utlsConfig := GetUTLSConfig(cfg.SNI, cfg.ALPN)
+	utlsConn := utls.UClient(rawConn, utlsConfig, utls.HelloChrome_Auto)
+
+	if err := utlsConn.Handshake(); err != nil {
+		rawConn.Close()
+		return fmt.Errorf("TLS handshake failed: %v", err)
 	}
 
-	// ✅ Send padding
-	padding := GeneratePadding(MaxJunkSize)
-	padLen := uint16(len(padding))
-	if err := binary.Write(uConn, binary.BigEndian, padLen); err != nil {
-		return fmt.Errorf("padding length write failed: %w", err)
-	}
-	if padLen > 0 {
-		if _, err := uConn.Write(padding); err != nil {
-			return fmt.Errorf("padding write failed: %w", err)
-		}
+	log.Printf("🔐 TLS handshake successful with %s (SNI: %s)", cfg.ServerAddr, cfg.SNI)
+
+	// Send PSK
+	if err := SecureWrite(utlsConn, []byte(cfg.PSK), AuthTimeout); err != nil {
+		utlsConn.Close()
+		return fmt.Errorf("PSK send failed: %v", err)
 	}
 
-	// ✅ Create yamux session
-	session, err := yamux.Client(uConn, nil)
+	// Send padding
+	padding := GeneratePadding(cfg.MinPaddingSize, cfg.MaxPaddingSize)
+	paddingLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(paddingLen, uint16(len(padding)))
+	if err := SecureWrite(utlsConn, paddingLen, AuthTimeout); err != nil {
+		utlsConn.Close()
+		return fmt.Errorf("padding length send failed: %v", err)
+	}
+	if err := FragmentedWrite(utlsConn, padding, cfg.FragmentSize, cfg.FragmentDelay, cfg.TimingJitter); err != nil {
+		utlsConn.Close()
+		return fmt.Errorf("padding send failed: %v", err)
+	}
+
+	log.Printf("✅ Authentication successful")
+
+	// Setup yamux
+	muxConfig := yamux.DefaultConfig()
+	muxConfig.KeepAliveInterval = cfg.MuxKeepAlive
+	session, err := yamux.Client(utlsConn, muxConfig)
 	if err != nil {
-		return fmt.Errorf("yamux client failed: %w", err)
+		utlsConn.Close()
+		return fmt.Errorf("yamux client failed: %v", err)
 	}
 	defer session.Close()
 
-	log.Println("✅ Connected to server")
+	log.Printf("🔗 Yamux session established")
 
-	// ✅ Start SOCKS5 proxy
-	ln, err := net.Listen("tcp", cfg.LocalAddr)
+	// Start SOCKS5 proxy
+	listener, err := net.Listen("tcp", cfg.LocalAddr)
 	if err != nil {
-		return fmt.Errorf("local listen failed: %w", err)
+		return fmt.Errorf("local listen failed: %v", err)
 	}
-	defer ln.Close()
+	defer listener.Close()
 
-	log.Printf("🚀 SOCKS5 proxy ready at %s", cfg.LocalAddr)
+	log.Printf("🚀 SOCKS5 Proxy ready at %s", cfg.LocalAddr)
 
 	for {
-		localConn, err := ln.Accept()
+		localConn, err := listener.Accept()
 		if err != nil {
-			return fmt.Errorf("accept failed: %w", err)
+			log.Printf("Accept error: %v", err)
+			continue
 		}
-		go handleSOCKS5(localConn, session)
-	}
-}
 
-func handleSOCKS5(localConn net.Conn, session *yamux.Session) {
-	defer localConn.Close()
-
-	// ✅ SOCKS5 greeting
-	buf := make([]byte, 256)
-	n, err := localConn.Read(buf)
-	if err != nil || n < 2 {
-		return
-	}
-
-	// Send: no auth required
-	localConn.Write([]byte{0x05, 0x00})
-
-	// ✅ Read request
-	n, err = localConn.Read(buf)
-	if err != nil || n < 7 {
-		return
-	}
-
-	if buf[1] != 0x01 { // Only CONNECT
-		localConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-
-	// ✅ Parse target address
-	var targetAddr string
-	atyp := buf[3]
-
-	switch atyp {
-	case 0x01: // IPv4
-		targetAddr = fmt.Sprintf("%d.%d.%d.%d:%d",
-			buf[4], buf[5], buf[6], buf[7],
-			binary.BigEndian.Uint16(buf[8:10]))
-	case 0x03: // Domain
-		domainLen := int(buf[4])
-		targetAddr = fmt.Sprintf("%s:%d",
-			string(buf[5:5+domainLen]),
-			binary.BigEndian.Uint16(buf[5+domainLen:7+domainLen]))
-	case 0x04: // IPv6
-		targetAddr = fmt.Sprintf("[%x:%x:%x:%x:%x:%x:%x:%x]:%d",
-			binary.BigEndian.Uint16(buf[4:6]),
-			binary.BigEndian.Uint16(buf[6:8]),
-			binary.BigEndian.Uint16(buf[8:10]),
-			binary.BigEndian.Uint16(buf[10:12]),
-			binary.BigEndian.Uint16(buf[12:14]),
-			binary.BigEndian.Uint16(buf[14:16]),
-			binary.BigEndian.Uint16(buf[16:18]),
-			binary.BigEndian.Uint16(buf[18:20]),
-			binary.BigEndian.Uint16(buf[20:22]))
-	default:
-		localConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-
-	// ✅ Open stream
-	stream, err := session.OpenStream()
-	if err != nil {
-		localConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-	defer stream.Close()
-
-	// ✅ Send target address to server
-	addrBytes := []byte(targetAddr)
-	addrLen := uint16(len(addrBytes))
-	binary.Write(stream, binary.BigEndian, addrLen)
-	stream.Write(addrBytes)
-
-	// ✅ SOCKS5 success response
-	localConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-
-	// ✅ Bidirectional copy
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		io.Copy(stream, localConn)
-	}()
-
-	go func() {
-		defer wg.Done()
-		io.Copy(localConn, stream)
-	}()
-
-	wg.Wait()
-}
+		go handle
