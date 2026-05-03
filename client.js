@@ -1,73 +1,69 @@
-import tls from 'tls';
-import { getQuantumStrategy } from './quantum-shaper.js';
-import { sendFeedback } from './ai-feedback.js';
+const tls = require('tls');
+const crypto = require('crypto');
 
-const SERVER_HOST = '185.208.172.162';
-const SERVER_PORT = 443;
+function startClient(config) {
+  let tlsSocket = null;
+  let reconnectTimer = null;
 
-export function startClient() {
-    console.log('[CLIENT] Starting quantum TLS client...');
-    connectWithQuantum();
-}
+  function connect() {
+    console.log(`[CLIENT] → Connecting to ${config.serverHost}:${config.serverPort}...`);
 
-async function connectWithQuantum() {
-    while (true) {
-        try {
-            console.log('[CLIENT] Connecting to server...');
+    const options = {
+      host: config.serverHost,
+      port: config.serverPort,
+      rejectUnauthorized: false,
+      minVersion: 'TLSv1.2'
+    };
 
-            // Get quantum strategy from AI
-            const strategy = await getQuantumStrategy({
-                target: `${SERVER_HOST}:${SERVER_PORT}`,
-                lastAttempt: Date.now()
-            });
+    tlsSocket = tls.connect(options, () => {
+      console.log(`[CLIENT] ✓ TLS connected to ${config.serverHost}:${config.serverPort}`);
+      console.log(`[CLIENT] ✓ Cipher: ${tlsSocket.getCipher().name}`);
+      
+      // Send quantum auth pattern
+      const authPattern = crypto.randomBytes(16);
+      tlsSocket.write(authPattern);
+      console.log(`[CLIENT] → Sent auth pattern: ${authPattern.toString('hex').substring(0, 16)}...`);
+    });
 
-            console.log('[CLIENT] Quantum strategy:', strategy);
+    tlsSocket.on('data', (data) => {
+      console.log(`[CLIENT] ← Received ${data.length} bytes`);
+    });
 
-            // Apply quantum delay
-            await sleep(strategy.delay_ms);
+    tlsSocket.on('error', (err) => {
+      console.error(`[CLIENT] ✗ Error: ${err.message}`);
+      scheduleReconnect();
+    });
 
-            // Connect with TLS
-            const socket = tls.connect({
-                host: SERVER_HOST,
-                port: SERVER_PORT,
-                servername: strategy.sni || 'www.google.com',
-                rejectUnauthorized: false,
-                minVersion: 'TLSv1.2',
-                maxVersion: 'TLSv1.3',
-                ciphers: strategy.ciphers || 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384'
-            });
+    tlsSocket.on('end', () => {
+      console.log('[CLIENT] ✗ Connection closed');
+      scheduleReconnect();
+    });
 
-            socket.on('secureConnect', () => {
-                console.log('[CLIENT] ✓ Connected successfully!');
-                sendFeedback({ success: true, strategy });
+    tlsSocket.on('close', () => {
+      console.log('[CLIENT] ✗ Socket closed');
+      scheduleReconnect();
+    });
+  }
 
-                // Keep alive with quantum pattern
-                setInterval(() => {
-                    if (!socket.destroyed) {
-                        socket.write(Buffer.from('ping'));
-                    }
-                }, 30000);
-            });
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    
+    console.log('[CLIENT] ⏳ Reconnecting in 5s...');
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, 5000);
+  }
 
-            socket.on('error', (err) => {
-                console.log('[CLIENT] ✗ Connection failed:', err.message);
-                sendFeedback({ success: false, error: err.message, strategy });
-            });
+  connect();
 
-            socket.on('end', () => {
-                console.log('[CLIENT] Connection closed');
-            });
-
-            // Wait before retry
-            await sleep(10000);
-
-        } catch (err) {
-            console.log('[CLIENT] Error:', err.message);
-            await sleep(5000);
-        }
+  return {
+    getSocket: () => tlsSocket,
+    disconnect: () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (tlsSocket) tlsSocket.destroy();
     }
+  };
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+module.exports = { startClient };
