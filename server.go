@@ -2,88 +2,90 @@ package main
 
 import (
 	"crypto/tls"
-	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
 )
 
-func RunServer(cfg *Config) {
-	tlsConfig, err := NewServerTLSConfig(cfg.CertFile, cfg.KeyFile)
+func RunServer(cfg *Config) error {
+	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		log.Fatalf("❌ TLS config failed: %v", err)
+		return fmt.Errorf("TLS config failed: %v", err)
 	}
 
-	ln, err := tls.Listen("tcp", cfg.ServerAddr, tlsConfig)
-	if err != nil {
-		log.Fatalf("❌ Server listen failed: %v", err)
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS13,
+		NextProtos:   cfg.ALPN,
 	}
-	defer ln.Close()
 
-	log.Printf("🚀 Server listening on %s", cfg.ServerAddr)
+	listener, err := tls.Listen("tcp", cfg.ServerAddr, tlsConfig)
+	if err != nil {
+		return fmt.Errorf("server listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	log.Printf("🚀 Ferrari Tunnel Server running on %s", cfg.ServerAddr)
 
 	for {
-		conn, err := ln.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("⚠️  Accept error: %v", err)
+			log.Printf("Accept error: %v", err)
 			continue
 		}
-		go handleServerConn(conn, cfg)
+
+		go handleServerConnection(conn, cfg)
 	}
 }
 
-func handleServerConn(conn net.Conn, cfg *Config) {
+func handleServerConnection(conn net.Conn, cfg *Config) {
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(AuthTimeout))
-
-	// ✅ Read PSK
-	pskBuf := make([]byte, len(cfg.PSK))
-	if _, err := io.ReadFull(conn, pskBuf); err != nil {
-		log.Printf("⚠️  PSK read failed: %v", err)
-		return
-	}
-	if string(pskBuf) != cfg.PSK {
-		log.Println("⚠️  Invalid PSK")
+	// Read PSK
+	pskBuf := make([]byte, 64)
+	n, err := SecureRead(conn, pskBuf, AuthTimeout)
+	if err != nil || string(pskBuf[:n]) != cfg.PSK {
+		log.Printf("❌ Auth failed from %s", conn.RemoteAddr())
 		return
 	}
 
-	// ✅ Read padding length
-	var padLen uint16
-	if err := binary.Read(conn, binary.BigEndian, &padLen); err != nil {
-		log.Printf("⚠️  Padding length read failed: %v", err)
+	log.Printf("✅ Client authenticated: %s", conn.RemoteAddr())
+
+	// Read and discard padding
+	paddingLenBuf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, paddingLenBuf); err != nil {
+		log.Printf("Padding read error: %v", err)
 		return
 	}
-
-	// ✅ Discard padding
-	if padLen > 0 {
-		if _, err := io.CopyN(io.Discard, conn, int64(padLen)); err != nil {
-			log.Printf("⚠️  Padding discard failed: %v", err)
-			return
-		}
+	paddingLen := int(paddingLenBuf[0])<<8 | int(paddingLenBuf[1])
+	if paddingLen > 0 && paddingLen < 4096 {
+		io.CopyN(io.Discard, conn, int64(paddingLen))
 	}
 
-	conn.SetDeadline(time.Time{})
-
-	// ✅ Create yamux session
-	session, err := yamux.Server(conn, nil)
+	// Setup yamux
+	muxConfig := yamux.DefaultConfig()
+	muxConfig.KeepAliveInterval = cfg.MuxKeepAlive
+	session, err := yamux.Server(conn, muxConfig)
 	if err != nil {
-		log.Printf("⚠️  Yamux server failed: %v", err)
+		log.Printf("Yamux server error: %v", err)
 		return
 	}
 	defer session.Close()
 
-	log.Println("✅ Client authenticated")
+	log.Printf("🔗 Yamux session established with %s", conn.RemoteAddr())
 
 	for {
-		stream, err := session.AcceptStream()
+		stream, err := session.Accept()
 		if err != nil {
+			log.Printf("Stream accept error: %v", err)
 			return
 		}
+
 		go handleStream(stream)
 	}
 }
@@ -91,43 +93,61 @@ func handleServerConn(conn net.Conn, cfg *Config) {
 func handleStream(stream net.Conn) {
 	defer stream.Close()
 
-	// ✅ Read target address from client
-	var addrLen uint16
-	if err := binary.Read(stream, binary.BigEndian, &addrLen); err != nil {
-		log.Printf("⚠️  Address length read failed: %v", err)
+	// Read target address (SOCKS5 format: [ATYP][ADDR][PORT])
+	addrTypeBuf := make([]byte, 1)
+	if _, err := io.ReadFull(stream, addrTypeBuf); err != nil {
+		log.Printf("Read address type error: %v", err)
 		return
 	}
 
-	addrBuf := make([]byte, addrLen)
-	if _, err := io.ReadFull(stream, addrBuf); err != nil {
-		log.Printf("⚠️  Address read failed: %v", err)
+	var targetAddr string
+	switch addrTypeBuf[0] {
+	case 0x01: // IPv4
+		addrBuf := make([]byte, 4)
+		if _, err := io.ReadFull(stream, addrBuf); err != nil {
+			return
+		}
+		portBuf := make([]byte, 2)
+		if _, err := io.ReadFull(stream, portBuf); err != nil {
+			return
+		}
+		port := int(portBuf[0])<<8 | int(portBuf[1])
+		targetAddr = fmt.Sprintf("%d.%d.%d.%d:%d", addrBuf[0], addrBuf[1], addrBuf[2], addrBuf[3], port)
+
+	case 0x03: // Domain
+		lenBuf := make([]byte, 1)
+		if _, err := io.ReadFull(stream, lenBuf); err != nil {
+			return
+		}
+		domainBuf := make([]byte, lenBuf[0])
+		if _, err := io.ReadFull(stream, domainBuf); err != nil {
+			return
+		}
+		portBuf := make([]byte, 2)
+		if _, err := io.ReadFull(stream, portBuf); err != nil {
+			return
+		}
+		port := int(portBuf[0])<<8 | int(portBuf[1])
+		targetAddr = fmt.Sprintf("%s:%d", string(domainBuf), port)
+
+	default:
+		log.Printf("Unsupported address type: 0x%02x", addrTypeBuf[0])
 		return
 	}
 
-	targetAddr := string(addrBuf)
-	log.Printf("🔗 Connecting to %s", targetAddr)
-
-	// ✅ Connect to real target
-	backend, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	// Connect to target
+	target, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
-		log.Printf("⚠️  Backend dial failed: %v", err)
+		log.Printf("Dial to %s failed: %v", targetAddr, err)
+		stream.Write([]byte{0x05, 0x01}) // Connection refused
 		return
 	}
-	defer backend.Close()
+	defer target.Close()
 
-	// ✅ Bidirectional copy
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// Send success response
+	stream.Write([]byte{0x05, 0x00}) // Success
 
-	go func() {
-		defer wg.Done()
-		io.Copy(backend, stream)
-	}()
+	log.Printf("🔀 Forwarding: %s → %s", stream.RemoteAddr(), targetAddr)
 
-	go func() {
-		defer wg.Done()
-		io.Copy(stream, backend)
-	}()
-
-	wg.Wait()
+	BidirectionalCopy(stream, target)
 }
