@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 
 const client = new OpenAI({
-    apiKey: "YOUR_API_KEY",
+    apiKey: "sk-TX6qZhnG4cKDsUKKglUGw41pYaOFNPfOJzTP6ZdrVgE1psOlY",
     baseURL: "https://api.gapgpt.app/v1"
 });
 
