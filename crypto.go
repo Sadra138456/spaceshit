@@ -2,25 +2,45 @@ package main
 
 import (
 	"crypto/rand"
-	"sync"
+	"crypto/tls"
+	"log"
+
+	utls "github.com/refraction-networking/utls"
 )
 
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 32*1024)
-		return &buf
-	},
+func NewClientTLSConfig(sni string) *utls.Config {
+	return &utls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+	}
 }
 
-func GeneratePadding() []byte {
-	size := 100 + (randInt() % 924) // 100-1024 bytes
-	padding := make([]byte, size)
-	rand.Read(padding)
-	return padding
+func NewServerTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
-func randInt() int {
-	var b [1]byte
-	rand.Read(b[:])
-	return int(b[0])
+func GeneratePadding(maxSize int) []byte {
+	if maxSize <= 0 {
+		return nil
+	}
+	size := 1 + (int(randomByte()) % maxSize)
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		log.Printf("⚠️  Padding generation failed: %v", err)
+	}
+	return buf
+}
+
+func randomByte() byte {
+	b := make([]byte, 1)
+	rand.Read(b)
+	return b[0]
 }
